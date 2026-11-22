@@ -19,28 +19,48 @@ jobs:
     # 纯 shell git 实现, 不依赖任何 action(避开 actions/checkout 在 Node24 runner 上的兼容问题)。
     if: github.repository != 'chnnic/jiwo-probe'
     runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.merge.outputs.changed }}
+      sha: ${{ steps.merge.outputs.sha }}
     steps:
       - name: Check out user repository
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          git clone --depth 50 "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" repo
+          git clone --no-tags "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" repo
           cd repo
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Merge upstream updates
+        id: merge
         run: |
           cd repo
           git remote add upstream "https://github.com/chnnic/jiwo-probe.git"
           git fetch --no-tags upstream main
 
-          if git diff --quiet HEAD "upstream/main"; then
+          if git merge-base --is-ancestor "upstream/main" HEAD; then
             echo "Already up to date."
-            exit 0
+            changed=false
+          else
+            git merge --no-edit "upstream/main" || {
+              echo "::error::与本地改动冲突, 请手动处理以下文件:"
+              git diff --name-only --diff-filter=U
+              exit 1
+            }
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+            changed=true
           fi
+          printf 'changed=%s\nsha=%s\n' "$changed" "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-          git merge --no-edit "upstream/main" || {
-            echo "::error::与本地改动冲突, 请手动处理以下文件:"
-            git diff --name-only --diff-filter=U
-            exit 1
-          }
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+  deploy:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+    # A push using GITHUB_TOKEN does not start another Actions workflow.
+    # Call deployment explicitly after a successful merge instead.
+    uses: ./.github/workflows/deploy-eufo.yml
+    with:
+      ref: ${{ needs.sync.outputs.sha }}
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
